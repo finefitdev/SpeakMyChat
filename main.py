@@ -1,9 +1,8 @@
-#===<[✦  SimpleTTS .✦ ݁˖]>===
-# reads twitch chat and speaks it with TTS
-# Open to improvements, in compactness/efficiency in logic✦
-# email improvements in ui or backend to hello@finefit.dev
-# -Finefit  2026 ݁˖
-#===========================
+# simpletts.py — reads twitch chat and speaks it
+# started this as a weekend thing, kept growing
+# piper works way better than gtts but needs the onnx files
+# sounds/ folder next to the exe for sound triggers
+# - finefit 2026
 
 import re
 import json
@@ -19,15 +18,14 @@ import os
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 
-# ──────────────────────────────────────────────────────────────────────────────
-# PyInstaller-safe path helper
-# ──────────────────────────────────────────────────────────────────────────────
-def resource_path(rel: str) -> str:
+
+def resource_path(rel):
     base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, rel)
 
 
-#====[˖ Verify externals ✦ ]====
+# ── check what we have ──
+
 PIPER_AVAILABLE = False
 try:
     from piper.voice import PiperVoice
@@ -42,24 +40,18 @@ except ImportError:
     GTTS_AVAILABLE = False
 
 if not PIPER_AVAILABLE and not GTTS_AVAILABLE:
-    sys.exit(
-        "No TTS engine found.\n"
-        "  pip install piper-tts   (recommended, offline neural voices)\n"
-        "  pip install gtts        (fallback, needs internet)"
-    )
+    sys.exit("need either piper-tts or gtts installed\npip install piper-tts")
 
 try:
     import pygame
-    # FIX: Always init at a single fixed rate — never re-init while playing.
-    # When a Piper voice has a different sample rate we resample in software
-    # instead of touching the mixer, which was the root cause of crashes.
     MIXER_RATE = 22050
     pygame.mixer.pre_init(frequency=MIXER_RATE, size=-16, channels=1, buffer=512)
     pygame.init()
     pygame.mixer.set_num_channels(64)
 except ImportError:
-    sys.exit("Missing dependency: pip install pygame-ce")
+    sys.exit("pip install pygame-ce")
 
+# espeak data path — pyinstaller bundles it differently
 if getattr(sys, "frozen", False):
     data_path = os.path.join(sys._MEIPASS, "espeak-ng-data")
 else:
@@ -68,7 +60,9 @@ else:
 
 os.environ["ESPEAK_DATA_PATH"] = data_path
 
-#====[˖ Setup (Pathways) ✦]====
+
+# ── paths ──
+
 SCRIPT_DIR  = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
 SOUNDS_DIR  = os.path.join(SCRIPT_DIR, "sounds")
 VOICES_DIR  = os.path.join(SCRIPT_DIR, "voices")
@@ -76,39 +70,36 @@ CONFIG_FILE = os.path.join(SCRIPT_DIR, "config.json")
 os.makedirs(SOUNDS_DIR, exist_ok=True)
 os.makedirs(VOICES_DIR, exist_ok=True)
 
-# ── Default state ─────────────────────────────────────────────────────────────
 
 state = {
     "volume":        1.0,
     "max_chars":     200,
     "max_speakers":  6,
-    "message_delay": 0.0,   # seconds of silence inserted after each TTS clip
+    "message_delay": 0.0,
 }
 
-SOUND_TRIGGERS: dict = {
+SOUND_TRIGGERS = {
     "diamond": "shine.mp3",
 }
 
-FORBIDDEN_WORDS: set = {
+FORBIDDEN_WORDS = {
     "slur1",
     "slur2",
-    "badword",
+    "bad-word",
 }
 
-FORBIDDEN_STRINGS: set = {
-    "amongus",
-    "badstring",
+FORBIDDEN_STRINGS = {
+    "-hey",
+    "-listen",
 }
 
 TWITCH_CHANNEL = ""
 
-PIPER_VOICES: list = [
-    "en_ryan.onnx",
+PIPER_VOICES = [
     "en_amy.onnx",
 ]
 
-# gTTS fallback accents
-ACCENTS: list = [
+ACCENTS = [
     ("en", "com"),
     ("en", "co.uk"),
     ("en", "com.au"),
@@ -121,8 +112,8 @@ ACCENTS: list = [
     ("es", "es"),
 ]
 
-IRC_HOST      = "irc.chat.twitch.tv"
-IRC_PORT      = 6667
+IRC_HOST = "irc.chat.twitch.tv"
+IRC_PORT = 6667
 PING_INTERVAL = 60
 
 _EMOJI_RE = re.compile(
@@ -142,32 +133,30 @@ _EMOJI_RE = re.compile(
     flags=re.UNICODE,
 )
 
-# ── Single-rate mixer helpers ─────────────────────────────────────────────────
-# The mixer is initialised once at MIXER_RATE and never re-inited.
-# Audio that was synthesised at a different sample rate is resampled here
-# using numpy — no pygame.mixer.quit() calls, no race conditions.
 
-def _resample(pcm_int16, from_rate: int, to_rate: int):
-    """Linear resample of int16 PCM array to a new sample rate."""
+# ── audio helpers ──
+# mixer stays at 22050 always, resample anything that isn't
+# learned this the hard way after random crashes mid-stream
+
+def _resample(pcm_int16, from_rate, to_rate):
     import numpy as np
     if from_rate == to_rate:
         return pcm_int16
-    ratio      = to_rate / from_rate
-    new_len    = max(1, int(len(pcm_int16) * ratio))
-    old_idx    = np.linspace(0, len(pcm_int16) - 1, new_len)
-    left       = np.floor(old_idx).astype(np.int64)
-    right      = np.minimum(left + 1, len(pcm_int16) - 1)
-    frac       = (old_idx - left).astype(np.float32)
-    resampled  = (pcm_int16[left].astype(np.float32) * (1 - frac) +
-                  pcm_int16[right].astype(np.float32) * frac)
-    return resampled.clip(-32768, 32767).astype(np.int16)
+    ratio   = to_rate / from_rate
+    new_len = max(1, int(len(pcm_int16) * ratio))
+    old_idx = np.linspace(0, len(pcm_int16) - 1, new_len)
+    left    = np.floor(old_idx).astype(np.int64)
+    right   = np.minimum(left + 1, len(pcm_int16) - 1)
+    frac    = (old_idx - left).astype(np.float32)
+    out     = (pcm_int16[left].astype(np.float32) * (1 - frac) +
+               pcm_int16[right].astype(np.float32) * frac)
+    return out.clip(-32768, 32767).astype(np.int16)
 
 
-def _play_pcm_blocking(pcm_int16, sample_rate: int) -> None:
-    """Play raw int16 PCM, resampling to MIXER_RATE if needed, blocking until done."""
+def _play_pcm_blocking(pcm_int16, sample_rate):
     import numpy as np
     audio = _resample(pcm_int16, sample_rate, MIXER_RATE)
-    buf   = io.BytesIO()
+    buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -183,7 +172,7 @@ def _play_pcm_blocking(pcm_int16, sample_rate: int) -> None:
         time.sleep(0.05)
 
 
-#====[ Config persistence ]====
+# ── config ──
 
 def load_config():
     global TWITCH_CHANNEL, FORBIDDEN_WORDS, FORBIDDEN_STRINGS, SOUND_TRIGGERS
@@ -192,20 +181,20 @@ def load_config():
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        TWITCH_CHANNEL          = data.get("channel", TWITCH_CHANNEL)
-        state["volume"]         = data.get("volume", state["volume"])
-        state["max_chars"]      = data.get("max_chars", state["max_chars"])
-        state["max_speakers"]   = data.get("max_speakers", state["max_speakers"])
-        state["message_delay"]  = data.get("message_delay", state["message_delay"])
-        FORBIDDEN_WORDS         = set(data.get("forbidden_words",   list(FORBIDDEN_WORDS)))
-        FORBIDDEN_STRINGS       = set(data.get("forbidden_strings", list(FORBIDDEN_STRINGS)))
+        TWITCH_CHANNEL         = data.get("channel", TWITCH_CHANNEL)
+        state["volume"]        = data.get("volume", state["volume"])
+        state["max_chars"]     = data.get("max_chars", state["max_chars"])
+        state["max_speakers"]  = data.get("max_speakers", state["max_speakers"])
+        state["message_delay"] = data.get("message_delay", state["message_delay"])
+        FORBIDDEN_WORDS        = set(data.get("forbidden_words",   list(FORBIDDEN_WORDS)))
+        FORBIDDEN_STRINGS      = set(data.get("forbidden_strings", list(FORBIDDEN_STRINGS)))
         SOUND_TRIGGERS.clear()
         SOUND_TRIGGERS.update(data.get("sound_triggers", SOUND_TRIGGERS))
     except Exception:
-        pass
+        pass  # just use defaults if config is broken
 
 
-def save_config(channel: str):
+def save_config(channel):
     data = {
         "channel":           channel,
         "volume":            state["volume"],
@@ -226,31 +215,31 @@ def save_config(channel: str):
 load_config()
 
 
-#====[ Filtering ]====
+# ── filtering ──
 
-def strip_emojis(text: str) -> str:
+def strip_emojis(text):
     return _EMOJI_RE.sub("", text).strip()
 
 
-def contains_forbidden(text: str) -> bool:
+def contains_forbidden(text):
     lower = text.lower()
     for s in FORBIDDEN_STRINGS:
         if s.lower() in lower:
             return True
     words = re.findall(r"[a-z0-9']+", lower)
-    forbidden_lower = {f.lower() for f in FORBIDDEN_WORDS}
-    return any(w in forbidden_lower for w in words)
+    fw = {f.lower() for f in FORBIDDEN_WORDS}
+    return any(w in fw for w in words)
 
 
-def clean_message(text: str) -> str:
+def clean_message(text):
     text = re.sub(r"https?://\S+", "", text)
     text = strip_emojis(text)
     return text.strip()[: state["max_chars"]]
 
 
-#====[ Sound Playing ]====
+# ── sound triggers ──
 
-def find_sound_for_message(text: str):
+def find_sound_for_message(text):
     lower = text.lower()
     for keyword, filename in SOUND_TRIGGERS.items():
         if keyword.lower() in lower:
@@ -258,11 +247,11 @@ def find_sound_for_message(text: str):
             if os.path.isfile(path):
                 return path
             else:
-                _log_queue.put(f"⚠  Sound file not found: {filename}")
+                _log_queue.put(f"⚠  missing sound file: {filename}")
     return None
 
 
-def play_sound_blocking(path: str) -> None:
+def play_sound_blocking(path):
     try:
         sound = pygame.mixer.Sound(path)
         sound.set_volume(state["volume"])
@@ -270,23 +259,23 @@ def play_sound_blocking(path: str) -> None:
         if ch:
             while ch.get_busy():
                 time.sleep(0.05)
-    except Exception as exc:
-        _log_queue.put(f"⚠  Sound play error: {exc}")
+    except Exception as e:
+        _log_queue.put(f"⚠  sound error: {e}")
 
 
-#====[ Voice assignment ]====
+# ── voice assignment ──
 
-_usr_voice: dict         = {}
-_voice_lock              = threading.Lock()
-_piper_model_cache: dict = {}
-_model_cache_lock        = threading.Lock()
+_usr_voice = {}
+_voice_lock = threading.Lock()
+_piper_model_cache = {}
+_model_cache_lock = threading.Lock()
 
 
-def _available_piper_voices() -> list:
+def _available_piper_voices():
     return [n for n in PIPER_VOICES if os.path.isfile(os.path.join(VOICES_DIR, n))]
 
 
-def get_user_voice(username: str):
+def get_user_voice(username):
     with _voice_lock:
         if username not in _usr_voice:
             available = _available_piper_voices() if PIPER_AVAILABLE else []
@@ -297,22 +286,20 @@ def get_user_voice(username: str):
         return _usr_voice[username]
 
 
-def _load_piper_model(model_filename: str):
+def _load_piper_model(model_filename):
     with _model_cache_lock:
         if model_filename not in _piper_model_cache:
-            model_path = os.path.join(VOICES_DIR, model_filename)
-            _piper_model_cache[model_filename] = PiperVoice.load(model_path)
+            path = os.path.join(VOICES_DIR, model_filename)
+            _piper_model_cache[model_filename] = PiperVoice.load(path)
         return _piper_model_cache[model_filename]
 
 
-#====[ TTS synthesis ]====
+# ── TTS ──
 
-def _speak_piper(model_filename: str, text: str) -> None:
+def _speak_piper(model_filename, text):
     import numpy as np
-
-    voice  = _load_piper_model(model_filename)
+    voice = _load_piper_model(model_filename)
     chunks = []
-
     for sentence_phonemes in voice.phonemize(text):
         ids   = voice.phonemes_to_ids(sentence_phonemes)
         chunk = voice.phoneme_ids_to_audio(ids)
@@ -320,18 +307,14 @@ def _speak_piper(model_filename: str, text: str) -> None:
             if chunk.dtype == np.float32:
                 chunk = (chunk * 32767).clip(-32768, 32767).astype(np.int16)
             chunks.append(chunk)
-
     if not chunks:
-        _log_queue.put("⚠  Piper produced empty audio — is espeak-ng installed?")
+        _log_queue.put("⚠  piper returned empty audio — espeak-ng installed?")
         return
-
-    all_audio   = np.concatenate(chunks)
-    sample_rate = voice.config.sample_rate
-    # Resample into the fixed MIXER_RATE; never touch pygame.mixer init.
-    _play_pcm_blocking(all_audio, sample_rate)
+    all_audio = np.concatenate(chunks)
+    _play_pcm_blocking(all_audio, voice.config.sample_rate)
 
 
-def _speak_gtts(lang: str, tld: str, text: str) -> None:
+def _speak_gtts(lang, tld, text):
     tts = gTTS(text=text, lang=lang, tld=tld, slow=False)
     buf = io.BytesIO()
     tts.write_to_fp(buf)
@@ -345,27 +328,15 @@ def _speak_gtts(lang: str, tld: str, text: str) -> None:
         time.sleep(0.05)
 
 
-#====[ Per-user queues ]====
-# Each user gets exactly one background thread and one queue.
-# Messages queue up and play in order; no message is dropped.
-# Concurrent speakers are capped by the _speaker_gate Condition.
-# The thread stays alive as long as messages keep arriving,
-# then exits after a short idle timeout and is recreated next time.
+# ── per-user queues ──
 
-_log_queue: queue.Queue = queue.Queue()
-
-# ── Global speaker gate ───────────────────────────────────────────────────────
-# A single Condition + counter replaces the swappable-semaphore approach.
-# Workers call _speaker_acquire() before speaking and _speaker_release() after.
-# The UI slider just writes to state["max_speakers"]; the gate reads it live,
-# so there is no object to swap and no risk of acquire/release mismatches.
+_log_queue = queue.Queue()
 
 _speaker_gate    = threading.Condition(threading.Lock())
-_active_speakers = 0   # how many threads are currently inside the gate
+_active_speakers = 0
 
 
-def _speaker_acquire() -> None:
-    """Block until a speaker slot is free, then claim it."""
+def _speaker_acquire():
     global _active_speakers
     with _speaker_gate:
         while _active_speakers >= state["max_speakers"]:
@@ -373,34 +344,29 @@ def _speaker_acquire() -> None:
         _active_speakers += 1
 
 
-def _speaker_release() -> None:
-    """Release a speaker slot and wake any waiting workers."""
+def _speaker_release():
     global _active_speakers
     with _speaker_gate:
         _active_speakers = max(0, _active_speakers - 1)
         _speaker_gate.notify_all()
 
 
-def _rebuild_semaphore(new_max: int) -> None:
-    """Called by the UI slider — update state and wake blocked workers to re-check."""
+def _rebuild_semaphore(new_max):
     state["max_speakers"] = new_max
     with _speaker_gate:
         _speaker_gate.notify_all()
 
-# username -> {"queue": Queue, "thread": Thread}
-_user_workers: dict     = {}
-_user_workers_lock      = threading.Lock()
 
-_WORKER_IDLE_TIMEOUT = 30.0   # seconds before an idle user thread exits
+_user_workers = {}
+_user_workers_lock = threading.Lock()
+_WORKER_IDLE_TIMEOUT = 30.0
 
 
-def _user_worker(username: str, q: queue.Queue) -> None:
-    """Dedicated thread for one user — drains their queue sequentially."""
+def _user_worker(username, q):
     while True:
         try:
             item = q.get(timeout=_WORKER_IDLE_TIMEOUT)
         except queue.Empty:
-            # Idle too long — exit and let the slot be reclaimed.
             with _user_workers_lock:
                 _user_workers.pop(username, None)
             return
@@ -408,7 +374,6 @@ def _user_worker(username: str, q: queue.Queue) -> None:
         text, sound_path = item
         voice_type, voice_data = get_user_voice(username)
 
-        # Acquire a speaker slot — blocks until under the max_speakers limit.
         _speaker_acquire()
         try:
             if sound_path:
@@ -420,13 +385,12 @@ def _user_worker(username: str, q: queue.Queue) -> None:
                 lang, tld = voice_data
                 _speak_gtts(lang, tld, text)
 
-            # Configurable gap between messages for this user
             delay = state["message_delay"]
             if delay > 0:
                 time.sleep(delay)
 
-        except Exception as exc:
-            _log_queue.put(f"⚠  TTS error [{username}]: {exc}")
+        except Exception as e:
+            _log_queue.put(f"⚠  TTS error [{username}]: {e}")
             if voice_type == "piper" and GTTS_AVAILABLE:
                 try:
                     _speak_gtts("en", "com", text)
@@ -437,14 +401,14 @@ def _user_worker(username: str, q: queue.Queue) -> None:
             q.task_done()
 
 
-def _enqueue_for_user(username: str, text: str, sound_path) -> None:
-    """Route a message to the user's dedicated queue, creating the worker if needed."""
+def _enqueue_for_user(username, text, sound_path):
     with _user_workers_lock:
         entry = _user_workers.get(username)
         if entry is None or not entry["thread"].is_alive():
             q = queue.Queue()
             t = threading.Thread(
-                target=_user_worker, args=(username, q), daemon=True, name=f"tts-{username}"
+                target=_user_worker, args=(username, q),
+                daemon=True, name=f"tts-{username}"
             )
             entry = {"queue": q, "thread": t}
             _user_workers[username] = entry
@@ -452,12 +416,12 @@ def _enqueue_for_user(username: str, text: str, sound_path) -> None:
         entry["queue"].put((text, sound_path))
 
 
-#====[ IRC handling ]====
+# ── IRC ──
 
 _irc_running = False
 
 
-def connect_irc(channel: str) -> socket.socket:
+def connect_irc(channel):
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((IRC_HOST, IRC_PORT))
     sock.send(b"PASS SCHMOOPIIE\r\n")
@@ -466,18 +430,18 @@ def connect_irc(channel: str) -> socket.socket:
     return sock
 
 
-def read_chat(channel: str) -> None:
+def read_chat(channel):
     global _irc_running
     _irc_running = True
-    sock         = connect_irc(channel)
-    buf          = ""
-    last_ping    = time.time()
-    _log_queue.put(f"✅  Connected to #{channel}")
+    sock = connect_irc(channel)
+    buf  = ""
+    last_ping = time.time()
+    _log_queue.put(f"✅  joined #{channel}")
 
     if PIPER_AVAILABLE and not _available_piper_voices():
         _log_queue.put(
-            "⚠  Piper installed but no .onnx models found in voices/ — using gTTS fallback.\n"
-            "    Download models from: https://github.com/rhasspy/piper/releases"
+            "⚠  no .onnx models in voices/ — falling back to gtts\n"
+            "    grab models from: https://github.com/rhasspy/piper/releases"
         )
 
     while _irc_running:
@@ -490,8 +454,8 @@ def read_chat(channel: str) -> None:
             data = sock.recv(4096).decode("utf-8", errors="ignore")
         except socket.timeout:
             continue
-        except Exception as exc:
-            _log_queue.put(f"⚠  IRC error: {exc} — reconnecting in 5s…")
+        except Exception as e:
+            _log_queue.put(f"⚠  IRC error: {e} — reconnecting in 5s…")
             time.sleep(5)
             if not _irc_running:
                 break
@@ -511,7 +475,7 @@ def read_chat(channel: str) -> None:
                 continue
 
             username = match.group(1)
-            text     = clean_message(match.group(2))
+            text = clean_message(match.group(2))
             if not text:
                 continue
 
@@ -521,16 +485,16 @@ def read_chat(channel: str) -> None:
 
             sound_path = find_sound_for_message(text)
             if sound_path:
-                _log_queue.put(f"🔔  [{username}] sound triggered: {os.path.basename(sound_path)}")
+                _log_queue.put(f"🔔  [{username}] {os.path.basename(sound_path)}")
 
             _log_queue.put(f"💬  [{username}]  {text}")
             _enqueue_for_user(username, text, sound_path)
 
     sock.close()
-    _log_queue.put("⏹  Disconnected.")
+    _log_queue.put("⏹  disconnected.")
 
 
-#====[ UI ]====
+# ── UI colors ──
 
 PURPLE   = "#9147ff"
 DARK_BG  = "#0e0e10"
@@ -554,8 +518,6 @@ class TwitchTTSApp(tk.Tk):
         self._build_ui()
         self._poll_log()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    # ── Layout ────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
         hdr = tk.Frame(self, bg=PURPLE, padx=16, pady=10)
@@ -605,12 +567,12 @@ class TwitchTTSApp(tk.Tk):
         ft = tk.Frame(self, bg=DARK_BG, padx=16, pady=6)
         ft.pack(fill="x")
         tk.Label(ft,
-                 text="No OAuth needed  •  Anonymous IRC  •  sounds/ and voices/ folders next to script",
+                 text="no oauth needed  •  anonymous IRC  •  sounds/ and voices/ next to the exe",
                  font=("Segoe UI", 8), bg=DARK_BG, fg=MUTED).pack()
 
     def _build_main_tab(self, parent):
         parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(3, weight=1)   # log now at row 3
+        parent.rowconfigure(3, weight=1)
 
         self._card(parent, "Channel").grid(row=0, column=0, sticky="ew", pady=(0, 10))
         row = tk.Frame(self._last_crd, bg=CARD_BG)
@@ -630,7 +592,6 @@ class TwitchTTSApp(tk.Tk):
             command=self._toggle_connection)
         self.connect_btn.pack(side="left")
 
-        # ── Row 1: Volume + Max Characters ────────────────────────────────────
         ctrl_row1 = tk.Frame(parent, bg=DARK_BG)
         ctrl_row1.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         ctrl_row1.columnconfigure(0, weight=1)
@@ -660,7 +621,6 @@ class TwitchTTSApp(tk.Tk):
                  highlightthickness=0, sliderrelief="flat", bd=0, showvalue=False,
                  length=160).pack(fill="x")
 
-        # ── Row 2: Max Speakers + Message Delay ───────────────────────────────
         ctrl_row2 = tk.Frame(parent, bg=DARK_BG)
         ctrl_row2.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         ctrl_row2.columnconfigure(0, weight=1)
@@ -694,7 +654,6 @@ class TwitchTTSApp(tk.Tk):
         tk.Label(dly_card, text="pause after each clip per user",
                  font=("Segoe UI", 7), bg=CARD_BG, fg=MUTED).pack(anchor="w")
 
-        # ── Row 3: Chat Log ───────────────────────────────────────────────────
         log_card = self._card(parent, "Chat Log")
         log_card.grid(row=3, column=0, sticky="nsew")
         log_card.columnconfigure(0, weight=1)
@@ -717,19 +676,18 @@ class TwitchTTSApp(tk.Tk):
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(3, weight=1)
 
-        status_text = ("✅  piper-tts installed — neural voices active"
-                       if PIPER_AVAILABLE else
-                       "⚠  piper-tts not installed — using gTTS (internet required)")
+        status_text = ("✅  piper-tts installed" if PIPER_AVAILABLE
+                       else "⚠  piper not found — using gtts (needs internet)")
         status_col  = GREEN if PIPER_AVAILABLE else ORANGE
         tk.Label(parent, text=status_text, font=("Segoe UI", 9, "bold"),
                  bg=DARK_BG, fg=status_col, anchor="w").grid(
                  row=0, column=0, sticky="ew", pady=(0, 6))
 
         tk.Label(parent,
-            text=("Drop  .onnx + .onnx.json  model pairs into the  voices/  folder.\n"
-                  "Each chatter gets one voice assigned randomly at session start.\n"
-                  "Models: https://github.com/rhasspy/piper/releases\n"
-                  "Recommended: en_US-lessac-medium, en_US-amy-medium, en_GB-alan-medium"),
+            text=("put .onnx + .onnx.json pairs in the voices/ folder\n"
+                  "each chatter gets a random voice at session start\n"
+                  "models: https://github.com/rhasspy/piper/releases\n"
+                  "good ones: en_US-lessac-medium, en_US-amy-medium, en_GB-alan-medium"),
             font=("Segoe UI", 9), bg=DARK_BG, fg=MUTED, justify="left").grid(
             row=1, column=0, sticky="w", pady=(0, 10))
 
@@ -792,9 +750,9 @@ class TwitchTTSApp(tk.Tk):
         parent.rowconfigure(2, weight=1)
 
         tk.Label(parent,
-            text=("Map a keyword to a sound file in your  sounds/  folder.\n"
-                  "The sound plays before TTS whenever the keyword appears in a message.\n"
-                  "Keyword matching is a substring check, case-insensitive."),
+            text=("keyword → sound file in sounds/\n"
+                  "sound plays before TTS when keyword shows up in chat\n"
+                  "case-insensitive substring match"),
             font=("Segoe UI", 9), bg=DARK_BG, fg=MUTED, justify="left").grid(
             row=0, column=0, sticky="w", pady=(0, 10))
 
@@ -878,8 +836,8 @@ class TwitchTTSApp(tk.Tk):
         parent.rowconfigure(1, weight=1)
 
         tk.Label(parent,
-            text=("Words: exact whole-word matches (case-insensitive).\n"
-                  "Strings: substring matches anywhere in the message."),
+            text=("words: whole-word match (case-insensitive)\n"
+                  "strings: substring match anywhere in the message"),
             font=("Segoe UI", 9), bg=DARK_BG, fg=MUTED, justify="left").grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
@@ -925,9 +883,7 @@ class TwitchTTSApp(tk.Tk):
 
         self._refresh_banned_lists()
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def _card(self, parent, title: str):
+    def _card(self, parent, title):
         outer = tk.Frame(parent, bg=CARD_BG,
                          highlightthickness=1, highlightbackground=BORDER)
         tk.Label(outer, text=title.upper(), font=("Segoe UI", 7, "bold"),
@@ -936,8 +892,6 @@ class TwitchTTSApp(tk.Tk):
         inner.pack(fill="both", pady=(0, 10))
         self._last_crd = inner
         return outer
-
-    # ── Events ────────────────────────────────────────────────────────────────
 
     def _on_volume(self, val):
         v = float(val)
@@ -956,7 +910,7 @@ class TwitchTTSApp(tk.Tk):
         _rebuild_semaphore(n)
 
     def _on_message_delay(self, val):
-        d = round(float(val) * 2) / 2   # snap to 0.5s steps
+        d = round(float(val) * 2) / 2
         state["message_delay"] = d
         self.dly_label.config(text=f"{d:.1f}s")
 
@@ -968,7 +922,7 @@ class TwitchTTSApp(tk.Tk):
         else:
             channel = self.channel_var.get().strip().lstrip("#")
             if not channel:
-                self._append_log("⚠  Enter a channel name first.", "blocked")
+                self._append_log("⚠  enter a channel name first", "blocked")
                 return
             _irc_running = False
             time.sleep(0.2)
@@ -989,7 +943,7 @@ class TwitchTTSApp(tk.Tk):
         kw = self.new_keyword_var.get().strip().lower()
         fn = self.new_file_var.get().strip()
         if not kw or not fn:
-            messagebox.showwarning("Missing input", "Enter both a keyword and a file name.")
+            messagebox.showwarning("Missing input", "need both a keyword and a filename")
             return
         SOUND_TRIGGERS[kw] = fn
         self.new_keyword_var.set("")
@@ -1004,8 +958,8 @@ class TwitchTTSApp(tk.Tk):
     def _refresh_tree(self):
         self.tree.delete(*self.tree.get_children())
         for kw, fn in sorted(SOUND_TRIGGERS.items()):
-            path   = os.path.join(SOUNDS_DIR, fn)
-            found  = os.path.isfile(path)
+            path  = os.path.join(SOUNDS_DIR, fn)
+            found = os.path.isfile(path)
             self.tree.insert("", "end",
                              values=(kw, fn, "✔ found" if found else "✘ missing"),
                              tags=("ok" if found else "missing",))
@@ -1044,7 +998,7 @@ class TwitchTTSApp(tk.Tk):
         for s in sorted(FORBIDDEN_STRINGS):
             self.strings_list.insert("end", s)
 
-    def _append_log(self, msg: str, tag: str = "chat"):
+    def _append_log(self, msg, tag="chat"):
         self.log.config(state="normal")
         self.log.insert("end", msg + "\n", tag)
         self.log.see("end")
@@ -1069,12 +1023,6 @@ class TwitchTTSApp(tk.Tk):
         self.destroy()
 
 
-#====[ Entry ]====
-
-def main():
+if __name__ == "__main__":
     app = TwitchTTSApp()
     app.mainloop()
-
-
-if __name__ == "__main__":
-    main()
