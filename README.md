@@ -1,8 +1,10 @@
 #  -=< EasyTTS ✦ >=-
 ### simple, enter a channel, hit connect, done. ݁˖
-(Also Setup banned words)
+
 ![screenshot](example/example1.png)
 
+
+(Also Setup banned words)
 ---
 
 ## -=< download ✦ >=-
