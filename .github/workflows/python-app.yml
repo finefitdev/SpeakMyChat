@@ -1,39 +1,58 @@
-# This workflow will install Python dependencies, run tests and lint with a single version of Python
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
-name: Python application
+# .github/workflows/build.yml
+name: Build Windows EXE
 
 on:
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    tags: ['v*']        # e.g. git tag v1.2 && git push --tags
+  workflow_dispatch:     # also lets you trigger it manually
 
 permissions:
-  contents: read
+  contents: write        # to upload to the Release
+  id-token: write        # for provenance attestation
+  attestations: write
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
-
+    runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v3
-      with:
-        python-version: "3.10"
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install flake8 pytest
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
-    - name: Test with pytest
-      run: |
-        pytest
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install piper-tts gtts pygame-ce pyttsx3 numpy pyinstaller
+
+      - name: Locate piper's espeak-ng-data
+        shell: pwsh
+        run: |
+          $e = python -c "import piper,pathlib;print(pathlib.Path(piper.__file__).parent/'espeak-ng-data')"
+          echo "ESPEAK_DIR=$e" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: >
+          pyinstaller --onefile --windowed --name SimpleTTS
+          --collect-all piper
+          --collect-all onnxruntime
+          --collect-data gtts
+          --add-data "${{ env.ESPEAK_DIR }};espeak-ng-data"
+          main.py
+
+      - name: Provenance attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/SimpleTTS.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SimpleTTS-windows
+          path: dist/SimpleTTS.exe
+
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SimpleTTS.exe
