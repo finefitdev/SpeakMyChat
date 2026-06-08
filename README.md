@@ -1,5 +1,5 @@
-#  -=< Speak My Chat! >=-
-### simple, enter a channel, hit connect, done. ݁˖
+#  Speak My Chat!
+### simple, enter a channel, hit connect, done. ݁
 
 ![screenshot](example/example1.png)
 
